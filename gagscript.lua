@@ -1,775 +1,720 @@
 --[[
-    Grow a Garden 2 — Auto Buy & Auto Tame Script (Kenshi Edition)
-    Features: Auto Buy Seeds, Auto Tame Pets, Auto Collect Event Seeds, Anti-AFK
+    Grow a Garden 2 — Full Auto Script (Kenshi v3)
+    Game: https://www.roblox.com/games/97598239454123/Grow-a-Garden-2
 
+    Features: Auto Buy Seeds, Auto Harvest, Auto Sell, Auto Tame Pets, Auto Event, Anti-AFK
     Usage: loadstring(game:HttpGet("https://raw.githubusercontent.com/ryuken25/gagscript/main/gagscript.lua"))()
 ]]
 
---------------------------------------------------------------
--- CONFIGURATION
---------------------------------------------------------------
-local CONFIG = {
-    BUY_DELAY         = 0.4,
-    SCAN_DELAY        = 2.0,
-    PET_SCAN_DELAY    = 3.0,
-    EVENT_SCAN_DELAY  = 5.0,
-    ANTI_AFK_INTERVAL = 120,
-    TAME_RANGE        = 200,
+local Players       = game:GetService("Players")
+local RS            = game:GetService("ReplicatedStorage")
+local WS            = game:GetService("Workspace")
+local RunService    = game:GetService("RunService")
+local VirtualUser   = game:GetService("VirtualUser")
 
-    AUTO_BUY_SEEDS  = true,
-    AUTO_TAME_PETS  = true,
-    AUTO_EVENT      = true,
+local LP         = Players.LocalPlayer
+local PGui       = LP:WaitForChild("PlayerGui")
+local Backpack   = LP:WaitForChild("Backpack")
+local LS         = LP:WaitForChild("leaderstats", 10)
 
-    SEED_PRIORITY = {
-        "Rainbow Seed", "Gold Seed", "Dragon's Breath", "Moon Bloom",
-        "Dragon Fruit", "Acorn", "Bamboo",
+--------------------------------------------------------------
+-- CONFIG
+--------------------------------------------------------------
+local CFG = {
+    AUTO_BUY     = true,
+    AUTO_HARVEST = true,
+    AUTO_SELL    = true,
+    AUTO_TAME    = true,
+    AUTO_EVENT   = true,
+
+    BUY_INTERVAL    = 5,
+    HARVEST_INTERVAL= 2,
+    SELL_THRESHOLD  = 3,
+    LOOP_DELAY      = 1.5,
+
+    SEEDS_TO_BUY = {
+        "Bamboo", "Acorn", "Rainbow Seed", "Gold Seed",
+        "Dragon's Breath", "Moon Bloom", "Dragon Fruit",
+        "Coconut", "Mango", "Glow Mushroom", "Pineapple",
+        "Cactus", "Mushroom", "Grape", "Banana",
+        "Cherry", "Sunflower", "Pomegranate", "Poison Apple",
+        "Ghost Pepper", "Venus Fly Trap", "Poison Ivy",
+        "Horned Melon", "Baby Cactus", "Green Bean",
+        "Corn", "Apple", "Tomato", "Tulip",
+        "Blueberry", "Strawberry", "Carrot",
     },
 
-    PET_TARGETS = {
-        ["Fat Cat"]        = { price = 0,          currency = "Sheckles",     method = "egg" },
-        ["Unicorn"]        = { price = 4000000,    currency = "Sheckles",     method = "map" },
-        ["Bear"]           = { price = 5000000,    currency = "Sheckles",     method = "map" },
-        ["Black Dragon"]   = { price = 20000000,   currency = "Sheckles",     method = "guild" },
-        ["Shadow Dragon"]  = { price = 30000000,   currency = "LeaveCurrency", method = "map" },
-        ["Ice Serpent"]    = { price = 20000000,   currency = "Sheckles",     method = "guild" },
+    PETS_TO_TAME = {
+        "Fat Cat", "Unicorn", "Bear", "Black Dragon",
+        "Shadow Dragon", "Ice Serpent", "Golden Dragonfly",
+        "Monkey", "Owl", "Deer", "Raccoon", "Frog",
     },
 }
 
 --------------------------------------------------------------
--- SERVICES
---------------------------------------------------------------
-local Players            = game:GetService("Players")
-local ReplicatedStorage  = game:GetService("ReplicatedStorage")
-local RunService         = game:GetService("RunService")
-local VirtualUser        = game:GetService("VirtualUser")
-local Workspace          = game:GetService("Workspace")
-
---------------------------------------------------------------
 -- STATE
 --------------------------------------------------------------
-local LocalPlayer   = Players.LocalPlayer
-local PlayerGui     = LocalPlayer:WaitForChild("PlayerGui")
-local Leaderstats   = LocalPlayer:WaitForChild("leaderstats")
-local Backpack      = LocalPlayer:WaitForChild("Backpack")
-local Running       = false
-local Stats         = { seeds_bought = 0, pets_tamed = 0, events_collected = 0, cycles = 0, errors = 0 }
-
-local GameEvents    = nil
-local BuyRemote     = nil
+local Running = false
+local S = { buy = 0, harv = 0, sell = 0, tame = 0, evt = 0, cyc = 0, err = 0 }
+local GE -- GameEvents folder
+local StatusText = "Idle"
 
 --------------------------------------------------------------
--- UTILITY
+-- HELPERS
 --------------------------------------------------------------
-local function log(msg)
-    print("[GAG2-Kenshi] " .. msg)
+local function log(m) print("[GAG2] " .. m) end
+local function wlog(m) warn("[GAG2] " .. m); S.err = S.err + 1 end
+local function sw(t) task.wait(t + math.random() * 0.2) end
+
+local function sheckles()
+    if not LS then return 0 end
+    local s = LS:FindFirstChild("Sheckles")
+    return s and s.Value or 0
 end
 
-local function warn_log(msg)
-    warn("[GAG2-Kenshi] " .. msg)
-    Stats.errors = Stats.errors + 1
+local function chr()
+    return LP.Character or LP.CharacterAdded:Wait()
 end
 
-local function safe_wait(seconds)
-    local jitter = seconds + (math.random() * seconds * 0.3)
-    task.wait(jitter)
+local function root()
+    local c = chr()
+    return c and c:FindFirstChild("HumanoidRootPart")
 end
 
-local function get_character()
-    return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-end
-
-local function get_hrp()
-    local char = get_character()
-    return char and char:FindFirstChild("HumanoidRootPart")
-end
-
-local function teleport_to(cf)
-    local hrp = get_hrp()
-    if not hrp then return false end
-    hrp.CFrame = cf
-    task.wait(0.15)
-    return true
-end
-
-local function get_currency(name)
-    local stat = Leaderstats:FindFirstChild(name)
-    if stat then return stat.Value end
-    if name == "LeaveCurrency" then
-        stat = Leaderstats:FindFirstChild("Leaves")
-            or Leaderstats:FindFirstChild("LeafCurrency")
-            or Leaderstats:FindFirstChild("Leave")
-        if stat then return stat.Value end
+local function tp(pos)
+    local r = root()
+    if not r then return end
+    if typeof(pos) == "Vector3" then
+        r.CFrame = CFrame.new(pos)
+    else
+        r.CFrame = pos
     end
-    return 0
+    task.wait(0.12)
 end
 
-local function safe_call(fn, ...)
-    local ok, err = pcall(fn, ...)
-    if not ok then
-        warn_log("Error: " .. tostring(err))
+local function fprompt(p)
+    if not p or not p:IsA("ProximityPrompt") then return false end
+    if typeof(fireproximityprompt) == "function" then
+        local ok = pcall(fireproximityprompt, p)
+        return ok
     end
+    local ok = pcall(function()
+        p.MaxActivationDistance = 9999
+        p:InputHoldBegin()
+        task.wait(p.HoldDuration + 0.1)
+        p:InputHoldEnd()
+    end)
+    return ok
+end
+
+local function fire(remote, ...)
+    if not remote then return false end
+    local ok, err
+    if remote:IsA("RemoteEvent") then
+        ok, err = pcall(function(...) remote:FireServer(...) end, ...)
+    elseif remote:IsA("RemoteFunction") then
+        ok, err = pcall(function(...) remote:InvokeServer(...) end, ...)
+    end
+    if not ok then wlog("Remote err: " .. tostring(err)) end
     return ok
 end
 
 --------------------------------------------------------------
--- PROXIMITY PROMPT
+-- FIND REMOTES — scan once, log everything
 --------------------------------------------------------------
-local function fire_proximity_prompt(prompt)
-    if not prompt or not prompt:IsA("ProximityPrompt") then return false end
+local function find_remotes()
+    GE = RS:FindFirstChild("GameEvents")
 
-    if fireproximityprompt then
-        safe_call(fireproximityprompt, prompt)
-        return true
-    end
-
-    local ok = pcall(function()
-        prompt.MaxActivationDistance = 9999
-        prompt:InputHoldBegin()
-        task.wait(prompt.HoldDuration + 0.1)
-        prompt:InputHoldEnd()
-    end)
-    if ok then return true end
-
-    local click = prompt.Parent and prompt.Parent:FindFirstChildOfClass("ClickDetector")
-    if click and fireclickdetector then
-        safe_call(fireclickdetector, click)
-        return true
-    end
-
-    return false
-end
-
---------------------------------------------------------------
--- INIT REMOTES
---------------------------------------------------------------
-local function init_remotes()
-    GameEvents = ReplicatedStorage:FindFirstChild("GameEvents")
-    if not GameEvents then
-        for _, child in ipairs(ReplicatedStorage:GetChildren()) do
-            if child:IsA("Folder") then
-                for _, sub in ipairs(child:GetChildren()) do
-                    if (sub:IsA("RemoteEvent") or sub:IsA("RemoteFunction"))
-                        and (sub.Name:lower():find("buy") or sub.Name:lower():find("seed") or sub.Name:lower():find("shop")) then
-                        GameEvents = child
+    if not GE then
+        for _, f in ipairs(RS:GetChildren()) do
+            if f:IsA("Folder") then
+                for _, c in ipairs(f:GetChildren()) do
+                    if c:IsA("RemoteEvent") or c:IsA("RemoteFunction") then
+                        GE = f
                         break
                     end
                 end
-            end
-            if GameEvents then break end
-        end
-    end
-
-    if not GameEvents then
-        warn_log("GameEvents folder not found in ReplicatedStorage")
-        return false
-    end
-
-    log("GameEvents: " .. GameEvents:GetFullName())
-
-    local buy_names = {"BuySeedStock", "BuySeed", "Buy_Seed", "BuyStock", "Shop_Buy", "PurchaseSeed"}
-    for _, name in ipairs(buy_names) do
-        BuyRemote = GameEvents:FindFirstChild(name)
-        if BuyRemote then
-            log("Buy remote: " .. BuyRemote.Name)
-            break
-        end
-    end
-
-    if not BuyRemote then
-        for _, child in ipairs(GameEvents:GetDescendants()) do
-            if (child:IsA("RemoteEvent") or child:IsA("RemoteFunction"))
-                and (child.Name:lower():find("buy") or child.Name:lower():find("seed")) then
-                BuyRemote = child
-                log("Buy remote (scan): " .. child:GetFullName())
-                break
+                if GE then break end
             end
         end
     end
 
-    if not BuyRemote then
-        warn_log("Buy remote not found — auto buy will use fallback")
+    if GE then
+        log("GameEvents: " .. GE:GetFullName())
+        local names = {}
+        for _, c in ipairs(GE:GetChildren()) do
+            if c:IsA("RemoteEvent") or c:IsA("RemoteFunction") then
+                table.insert(names, c.Name .. "(" .. c.ClassName .. ")")
+            end
+        end
+        log("Remotes: " .. table.concat(names, ", "))
+    else
+        wlog("GameEvents NOT FOUND — listing all RS children:")
+        for _, c in ipairs(RS:GetChildren()) do
+            log("  RS." .. c.Name .. " [" .. c.ClassName .. "]")
+        end
     end
-
-    return true
 end
 
---------------------------------------------------------------
--- SEED SHOP SCANNER
---------------------------------------------------------------
-local function get_seed_stock()
-    local stock = {}
-
-    local seed_shop = PlayerGui:FindFirstChild("Seed_Shop")
-    if not seed_shop then
-        for _, gui in ipairs(PlayerGui:GetChildren()) do
-            if gui:IsA("ScreenGui") and (gui.Name:lower():find("seed") or gui.Name:lower():find("shop")) then
-                seed_shop = gui
-                break
-            end
-        end
+local function get_remote(name)
+    if GE then
+        return GE:FindFirstChild(name)
     end
-
-    if not seed_shop then return stock end
-
-    for _, desc in ipairs(seed_shop:GetDescendants()) do
-        if desc:IsA("Frame") or desc:IsA("ImageLabel") then
-            local stock_text = desc:FindFirstChild("Stock_Text")
-                or desc:FindFirstChild("StockText")
-                or desc:FindFirstChild("Stock")
-            local main_frame = desc:FindFirstChild("Main_Frame") or desc
-
-            if stock_text and stock_text:IsA("TextLabel") then
-                local count = tonumber(stock_text.Text:match("%d+"))
-                if count and count > 0 then
-                    stock[desc.Name] = count
-                end
-            end
-        end
-    end
-
-    return stock
-end
-
-local function get_seed_price(seed_name)
-    local seed_shop = PlayerGui:FindFirstChild("Seed_Shop")
-    if not seed_shop then return nil end
-
-    for _, desc in ipairs(seed_shop:GetDescendants()) do
-        if desc.Name == seed_name then
-            local price_label = desc:FindFirstChild("Price_Text", true)
-                or desc:FindFirstChild("PriceText", true)
-                or desc:FindFirstChild("Price", true)
-                or desc:FindFirstChild("Cost", true)
-            if price_label and price_label:IsA("TextLabel") then
-                local price = tonumber(price_label.Text:gsub("[^%d]", ""))
-                return price
-            end
-        end
-    end
-    return nil
+    return RS:FindFirstChild(name, true)
 end
 
 --------------------------------------------------------------
 -- AUTO BUY SEEDS
+-- Direct approach: fire BuySeedStock for each seed, server
+-- rejects if out of stock. No UI scanning needed.
 --------------------------------------------------------------
-local function auto_buy_seeds()
-    if not CONFIG.AUTO_BUY_SEEDS then return end
+local function do_buy()
+    if not CFG.AUTO_BUY then return end
+    StatusText = "Buying seeds..."
 
-    local stock = get_seed_stock()
-    if not next(stock) then return end
+    local remote = get_remote("BuySeedStock")
+        or get_remote("BuySeed")
+        or get_remote("Buy_Seed")
+        or get_remote("BuyStock")
+        or get_remote("PurchaseSeed")
 
-    local sheckles = get_currency("Sheckles")
+    if not remote then
+        -- Fallback: scan all remotes for anything with "buy" + "seed"
+        if GE then
+            for _, c in ipairs(GE:GetChildren()) do
+                if (c:IsA("RemoteEvent") or c:IsA("RemoteFunction")) then
+                    local n = c.Name:lower()
+                    if n:find("buy") and (n:find("seed") or n:find("stock")) then
+                        remote = c
+                        break
+                    end
+                end
+            end
+        end
+    end
 
-    for _, seed_name in ipairs(CONFIG.SEED_PRIORITY) do
+    if not remote then
+        -- Still nothing? Try ANY remote with "buy" in RS
+        for _, c in ipairs(RS:GetDescendants()) do
+            if (c:IsA("RemoteEvent") or c:IsA("RemoteFunction")) and c.Name:lower():find("buy") then
+                remote = c
+                log("Fallback buy remote: " .. c:GetFullName())
+                break
+            end
+        end
+    end
+
+    if not remote then
+        if S.cyc <= 3 then wlog("No buy remote found anywhere") end
+        return
+    end
+
+    local cur = sheckles()
+    local bought_this = 0
+
+    for _, seed in ipairs(CFG.SEEDS_TO_BUY) do
         if not Running then break end
+        local before = sheckles()
+        fire(remote, seed)
+        sw(0.3)
+        local after = sheckles()
+        if after < before then
+            bought_this = bought_this + 1
+            S.buy = S.buy + 1
+            log("Bought: " .. seed .. " (" .. tostring(before - after) .. " Sheckles)")
+        end
+    end
 
-        local count = stock[seed_name]
-        if count and count > 0 then
-            local price = get_seed_price(seed_name)
+    if bought_this > 0 then
+        log("Bought " .. bought_this .. " seed(s) this cycle | Total: " .. S.buy)
+    end
+end
 
-            if price and price > sheckles then
-                log(seed_name .. " costs " .. tostring(price) .. " but only have " .. tostring(sheckles) .. " Sheckles — skipping")
-            else
-                if BuyRemote then
-                    for i = 1, count do
-                        if not Running then break end
-                        local current = get_currency("Sheckles")
-                        if price and current < price then
-                            log("Not enough Sheckles for " .. seed_name .. " — stopping")
+--------------------------------------------------------------
+-- AUTO HARVEST — find ProximityPrompts in player's farm
+--------------------------------------------------------------
+local function find_farm()
+    local farm = WS:FindFirstChild("Farm") or WS:FindFirstChild("Farms")
+    if not farm then return nil end
+
+    for _, f in ipairs(farm:GetChildren()) do
+        local imp = f:FindFirstChild("Important")
+        if imp then
+            local d = imp:FindFirstChild("Data")
+            if d then
+                local o = d:FindFirstChild("Owner")
+                if o and tostring(o.Value) == LP.Name then
+                    return f
+                end
+            end
+        end
+    end
+
+    return farm:FindFirstChild(LP.Name)
+end
+
+local function do_harvest()
+    if not CFG.AUTO_HARVEST then return 0 end
+    StatusText = "Harvesting..."
+
+    local farm = find_farm()
+    local count = 0
+
+    if farm then
+        local plants = farm:FindFirstChild("Important")
+        if plants then
+            plants = plants:FindFirstChild("Plants_Physical") or plants
+        else
+            plants = farm
+        end
+
+        for _, desc in ipairs(plants:GetDescendants()) do
+            if not Running then break end
+            if desc:IsA("ProximityPrompt") and desc.Enabled then
+                local par = desc.Parent
+                local pos = nil
+                if par:IsA("BasePart") then
+                    pos = par.Position
+                elseif par:IsA("Model") then
+                    local pp = par.PrimaryPart or par:FindFirstChildOfClass("BasePart")
+                    if pp then pos = pp.Position end
+                end
+                if pos then
+                    tp(pos + Vector3.new(0, 2, 0))
+                    sw(0.1)
+                end
+                if fprompt(desc) then
+                    count = count + 1
+                    S.harv = S.harv + 1
+                end
+                sw(0.2)
+            end
+        end
+    end
+
+    -- Also check nearby prompts (fruits on ground etc)
+    local r = root()
+    if r then
+        for _, desc in ipairs(WS:GetDescendants()) do
+            if not Running then break end
+            if desc:IsA("ProximityPrompt") and desc.Enabled then
+                local par = desc.Parent
+                if par and par:IsA("BasePart") then
+                    local dist = (par.Position - r.Position).Magnitude
+                    if dist < 30 then
+                        local at = (desc.ActionText or ""):lower()
+                        local ot = (desc.ObjectText or ""):lower()
+                        if at:find("harvest") or at:find("pick") or at:find("collect")
+                            or ot:find("fruit") or ot:find("crop") or at == "" then
+                            tp(par.Position + Vector3.new(0, 2, 0))
+                            sw(0.1)
+                            if fprompt(desc) then
+                                count = count + 1
+                                S.harv = S.harv + 1
+                            end
+                            sw(0.2)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if count > 0 then
+        log("Harvested: " .. count .. " | Total: " .. S.harv)
+    end
+    return count
+end
+
+--------------------------------------------------------------
+-- AUTO SELL
+--------------------------------------------------------------
+local function do_sell()
+    if not CFG.AUTO_SELL then return end
+    StatusText = "Selling..."
+
+    -- Count crops in inventory
+    local crops = 0
+    for _, item in ipairs(Backpack:GetChildren()) do
+        if item:IsA("Tool") then
+            if item:FindFirstChild("Item_String") or item:FindFirstChild("Crop") then
+                crops = crops + 1
+            end
+        end
+    end
+    local c = chr()
+    if c then
+        for _, item in ipairs(c:GetChildren()) do
+            if item:IsA("Tool") and (item:FindFirstChild("Item_String") or item:FindFirstChild("Crop")) then
+                crops = crops + 1
+            end
+        end
+    end
+
+    if crops < CFG.SELL_THRESHOLD then return end
+
+    local prev = root() and root().CFrame
+
+    -- Try sell remote
+    local sell_remote = get_remote("Sell_Inventory")
+        or get_remote("SellInventory")
+        or get_remote("Sell_Item")
+        or get_remote("SellAll")
+        or get_remote("Sell")
+
+    if not sell_remote and GE then
+        for _, c in ipairs(GE:GetChildren()) do
+            if (c:IsA("RemoteEvent") or c:IsA("RemoteFunction")) and c.Name:lower():find("sell") then
+                sell_remote = c
+                break
+            end
+        end
+    end
+
+    if sell_remote then
+        -- Teleport to sell NPC (Steven) first
+        local steven = nil
+        local npcs = WS:FindFirstChild("NPCS") or WS:FindFirstChild("NPCs") or WS:FindFirstChild("Npcs")
+        if npcs then
+            steven = npcs:FindFirstChild("Steven") or npcs:FindFirstChild("Sell")
+        end
+        if steven then
+            local part = steven:FindFirstChildOfClass("BasePart") or steven.PrimaryPart
+            if part then tp(part.Position + Vector3.new(0, 3, 0)) end
+            sw(0.3)
+        else
+            tp(Vector3.new(62, 4, -26))
+            sw(0.3)
+        end
+
+        local before = sheckles()
+        fire(sell_remote)
+        sw(0.8)
+        local after = sheckles()
+        S.sell = S.sell + 1
+        local earned = after - before
+        if earned > 0 then
+            log("Sold! +" .. tostring(earned) .. " Sheckles | Total sells: " .. S.sell)
+        else
+            log("Sell fired | Total: " .. S.sell)
+        end
+    else
+        -- Fallback: teleport to sell area and use proximity prompt
+        local npcs = WS:FindFirstChild("NPCS") or WS:FindFirstChild("NPCs")
+        if npcs then
+            local steven = npcs:FindFirstChild("Steven")
+            if steven then
+                local part = steven:FindFirstChildOfClass("BasePart") or steven.PrimaryPart
+                if part then
+                    tp(part.Position + Vector3.new(0, 3, 0))
+                    sw(0.5)
+                    for _, d in ipairs(steven:GetDescendants()) do
+                        if d:IsA("ProximityPrompt") then
+                            fprompt(d)
+                            S.sell = S.sell + 1
+                            log("Sold via NPC prompt | Total: " .. S.sell)
                             break
                         end
-
-                        if BuyRemote:IsA("RemoteEvent") then
-                            safe_call(function() BuyRemote:FireServer(seed_name) end)
-                        elseif BuyRemote:IsA("RemoteFunction") then
-                            safe_call(function() BuyRemote:InvokeServer(seed_name) end)
-                        end
-
-                        Stats.seeds_bought = Stats.seeds_bought + 1
-                        safe_wait(CONFIG.BUY_DELAY)
                     end
-                    log("Bought " .. seed_name .. " x" .. tostring(count) .. " | Total: " .. Stats.seeds_bought)
-                else
-                    log("No buy remote available for " .. seed_name)
                 end
             end
         end
+        sw(0.5)
     end
 
-    for seed_name, count in pairs(stock) do
+    if prev then tp(prev) end
+end
+
+--------------------------------------------------------------
+-- AUTO TAME PETS — scan workspace for target pets
+--------------------------------------------------------------
+local function do_tame()
+    if not CFG.AUTO_TAME then return end
+
+    local want = {}
+    for _, name in ipairs(CFG.PETS_TO_TAME) do want[name] = true end
+
+    for _, desc in ipairs(WS:GetDescendants()) do
         if not Running then break end
-
-        local dominated = false
-        for _, priority in ipairs(CONFIG.SEED_PRIORITY) do
-            if seed_name == priority then dominated = true; break end
-        end
-        if dominated then continue end
-
-        local rarity_keywords = {"divine", "godly", "mythical", "legendary", "epic"}
-        local name_lower = seed_name:lower()
-        local is_rare = false
-        for _, kw in ipairs(rarity_keywords) do
-            if name_lower:find(kw) then is_rare = true; break end
-        end
-
-        if is_rare and count > 0 and BuyRemote then
-            local price = get_seed_price(seed_name)
-            local sheckles_now = get_currency("Sheckles")
-
-            if price and price > sheckles_now then
-                log(seed_name .. " (rare) too expensive — " .. tostring(price) .. " vs " .. tostring(sheckles_now))
-            else
-                for i = 1, count do
-                    if not Running then break end
-                    local current = get_currency("Sheckles")
-                    if price and current < price then break end
-
-                    if BuyRemote:IsA("RemoteEvent") then
-                        safe_call(function() BuyRemote:FireServer(seed_name) end)
-                    elseif BuyRemote:IsA("RemoteFunction") then
-                        safe_call(function() BuyRemote:InvokeServer(seed_name) end)
-                    end
-
-                    Stats.seeds_bought = Stats.seeds_bought + 1
-                    safe_wait(CONFIG.BUY_DELAY)
+        if desc:IsA("Model") and want[desc.Name] then
+            local prompt = desc:FindFirstChild("ProximityPrompt", true)
+            if prompt and prompt:IsA("ProximityPrompt") then
+                StatusText = "Taming " .. desc.Name .. "..."
+                local part = desc.PrimaryPart or desc:FindFirstChildOfClass("BasePart")
+                if part then
+                    tp(part.Position + Vector3.new(0, 2, 0))
+                    sw(0.3)
                 end
-                log("Bought rare seed: " .. seed_name .. " x" .. tostring(count))
+                if fprompt(prompt) then
+                    S.tame = S.tame + 1
+                    log("TAMED: " .. desc.Name .. "! | Total: " .. S.tame)
+                end
+                sw(0.8)
             end
         end
     end
 end
 
 --------------------------------------------------------------
--- AUTO TAME PETS
+-- AUTO EVENT — collect event/weather drops
 --------------------------------------------------------------
-local function scan_wild_pets()
-    local found = {}
-    local search_folders = {
-        Workspace:FindFirstChild("Pets"),
-        Workspace:FindFirstChild("WildPets"),
-        Workspace:FindFirstChild("SpawnedPets"),
-        Workspace:FindFirstChild("MapPets"),
-        Workspace:FindFirstChild("Animals"),
-    }
+local function do_event()
+    if not CFG.AUTO_EVENT then return end
+    local count = 0
 
-    for _, folder in ipairs(search_folders) do
-        if folder then
-            for _, obj in ipairs(folder:GetDescendants()) do
-                if obj:IsA("ProximityPrompt") then
-                    local pet_model = obj.Parent
-                    if pet_model:IsA("Model") then
-                        pet_model = pet_model
-                    elseif pet_model:IsA("BasePart") then
-                        pet_model = pet_model.Parent
-                    end
-
-                    local pet_name = pet_model and pet_model.Name or ""
-                    if CONFIG.PET_TARGETS[pet_name] then
-                        table.insert(found, { name = pet_name, prompt = obj, model = pet_model })
-                    end
-                end
-            end
-        end
-    end
-
-    if #found == 0 then
-        for _, desc in ipairs(Workspace:GetDescendants()) do
-            if desc:IsA("Model") and CONFIG.PET_TARGETS[desc.Name] then
-                local prompt = desc:FindFirstChildOfClass("ProximityPrompt")
-                    or desc:FindFirstChild("ProximityPrompt", true)
-                if prompt then
-                    table.insert(found, { name = desc.Name, prompt = prompt, model = desc })
-                end
-            end
-        end
-    end
-
-    return found
-end
-
-local function auto_tame_pets()
-    if not CONFIG.AUTO_TAME_PETS then return end
-
-    local pets = scan_wild_pets()
-    if #pets == 0 then return end
-
-    for _, pet in ipairs(pets) do
+    for _, desc in ipairs(WS:GetDescendants()) do
         if not Running then break end
+        local n = desc.Name:lower()
+        local pn = desc.Parent and desc.Parent.Name:lower() or ""
 
-        local cfg = CONFIG.PET_TARGETS[pet.name]
-        if not cfg then continue end
+        local is_event = n:find("event") or n:find("seasonal") or n:find("weather")
+            or n:find("drop") or n:find("special")
+            or pn:find("event") or pn:find("seasonal") or pn:find("weather") or pn:find("drop")
 
-        if cfg.method == "egg" then
-            log(pet.name .. " is from eggs — can't auto-buy, skipping")
-            continue
-        end
-
-        local currency_amount = get_currency(cfg.currency)
-        if cfg.price > 0 and currency_amount < cfg.price then
-            log(pet.name .. " costs " .. tostring(cfg.price) .. " " .. cfg.currency .. " but have " .. tostring(currency_amount) .. " — skipping")
-            continue
-        end
-
-        local pet_part = pet.model.PrimaryPart or pet.model:FindFirstChildOfClass("BasePart")
-        if pet_part then
-            local dist = 0
-            local hrp = get_hrp()
-            if hrp then
-                dist = (hrp.Position - pet_part.Position).Magnitude
-            end
-
-            if dist > CONFIG.TAME_RANGE then
-                log(pet.name .. " found but too far (" .. math.floor(dist) .. " studs) — teleporting")
-            end
-
-            teleport_to(CFrame.new(pet_part.Position + Vector3.new(0, 2, 0)))
-            safe_wait(0.3)
-        end
-
-        if fire_proximity_prompt(pet.prompt) then
-            Stats.pets_tamed = Stats.pets_tamed + 1
-            log("Tamed " .. pet.name .. "! | Total: " .. Stats.pets_tamed)
-            safe_wait(1.0)
-        else
-            warn_log("Failed to tame " .. pet.name)
-        end
-    end
-end
-
---------------------------------------------------------------
--- AUTO COLLECT EVENT SEEDS
---------------------------------------------------------------
-local function auto_collect_events()
-    if not CONFIG.AUTO_EVENT then return end
-
-    local event_folders = {
-        Workspace:FindFirstChild("Events"),
-        Workspace:FindFirstChild("EventSeeds"),
-        Workspace:FindFirstChild("EventItems"),
-        Workspace:FindFirstChild("Collectibles"),
-        Workspace:FindFirstChild("SeasonalItems"),
-        Workspace:FindFirstChild("FallHarvest"),
-        Workspace:FindFirstChild("SummerEvent"),
-    }
-
-    local collected = 0
-
-    for _, folder in ipairs(event_folders) do
-        if folder then
-            for _, item in ipairs(folder:GetDescendants()) do
-                if not Running then break end
-
-                if item:IsA("ProximityPrompt") then
-                    local part = item.Parent
-                    if part and (part:IsA("BasePart") or part:IsA("Model")) then
-                        local pos
-                        if part:IsA("BasePart") then
-                            pos = part.Position
-                        else
-                            pos = part:GetPivot().Position
-                        end
-
-                        teleport_to(CFrame.new(pos + Vector3.new(0, 2, 0)))
-                        safe_wait(0.2)
-
-                        if fire_proximity_prompt(item) then
-                            collected = collected + 1
-                            Stats.events_collected = Stats.events_collected + 1
-                        end
-                    end
-                elseif item:IsA("ClickDetector") then
-                    if fireclickdetector then
-                        local part = item.Parent
-                        if part and part:IsA("BasePart") then
-                            teleport_to(CFrame.new(part.Position + Vector3.new(0, 2, 0)))
-                            safe_wait(0.2)
-                            safe_call(fireclickdetector, item)
-                            collected = collected + 1
-                            Stats.events_collected = Stats.events_collected + 1
-                        end
-                    end
+        if is_event and desc:IsA("ProximityPrompt") and desc.Enabled then
+            local par = desc.Parent
+            local pos = par:IsA("BasePart") and par.Position
+                or (par:IsA("Model") and par.PrimaryPart and par.PrimaryPart.Position)
+            if pos then
+                tp(pos + Vector3.new(0, 2, 0))
+                sw(0.2)
+                if fprompt(desc) then
+                    count = count + 1
+                    S.evt = S.evt + 1
                 end
             end
         end
     end
 
-    if #event_folders == 0 or collected == 0 then
-        for _, desc in ipairs(Workspace:GetDescendants()) do
-            if not Running then break end
-            if desc:IsA("BasePart") or desc:IsA("Model") then
-                local name_lower = desc.Name:lower()
-                if name_lower:find("event") and (name_lower:find("seed") or name_lower:find("collect") or name_lower:find("pickup")) then
-                    local prompt = desc:FindFirstChildOfClass("ProximityPrompt")
-                        or desc:FindFirstChild("ProximityPrompt", true)
-                    if prompt then
-                        local pos
-                        if desc:IsA("BasePart") then
-                            pos = desc.Position
-                        else
-                            pos = desc:GetPivot().Position
-                        end
-                        teleport_to(CFrame.new(pos + Vector3.new(0, 2, 0)))
-                        safe_wait(0.2)
-                        if fire_proximity_prompt(prompt) then
-                            collected = collected + 1
-                            Stats.events_collected = Stats.events_collected + 1
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    if collected > 0 then
-        log("Collected " .. collected .. " event item(s) | Total: " .. Stats.events_collected)
-    end
+    if count > 0 then log("Events collected: " .. count .. " | Total: " .. S.evt) end
 end
 
 --------------------------------------------------------------
 -- ANTI-AFK
 --------------------------------------------------------------
-local function setup_anti_afk()
-    local conn = LocalPlayer.Idled:Connect(function()
+local afk_conn
+local function setup_afk()
+    afk_conn = LP.Idled:Connect(function()
         if VirtualUser then
             VirtualUser:CaptureController()
             VirtualUser:ClickButton2(Vector2.new())
         end
-        log("Anti-AFK triggered")
     end)
-
-    task.spawn(function()
-        while Running do
-            task.wait(CONFIG.ANTI_AFK_INTERVAL)
-            if Running and VirtualUser then
-                pcall(function()
-                    VirtualUser:CaptureController()
-                    VirtualUser:ClickButton2(Vector2.new())
-                end)
-            end
-        end
-    end)
-
-    log("Anti-AFK enabled")
-    return conn
-end
-
---------------------------------------------------------------
--- STATUS
---------------------------------------------------------------
-local function print_status()
-    log(string.format(
-        "--- Status --- Cycles: %d | Seeds Bought: %d | Pets Tamed: %d | Events: %d | Errors: %d",
-        Stats.cycles, Stats.seeds_bought, Stats.pets_tamed, Stats.events_collected, Stats.errors
-    ))
 end
 
 --------------------------------------------------------------
 -- MAIN LOOP
 --------------------------------------------------------------
-local function main_loop()
-    log("=== Grow a Garden 2 — Auto Buy & Tame Started ===")
-    log("Player: " .. LocalPlayer.Name)
-    log("Sheckles: " .. tostring(get_currency("Sheckles")))
+local buy_timer = 0
 
-    log("Scanning remotes...")
-    init_remotes()
+local function main()
+    log("=== GAG2 Kenshi v3.0 Started ===")
+    log("Player: " .. LP.Name)
+    log("Sheckles: " .. tostring(sheckles()))
+    log("Game PlaceId: " .. tostring(game.PlaceId))
 
-    local afk_conn = setup_anti_afk()
+    find_remotes()
+    setup_afk()
 
     while Running do
-        Stats.cycles = Stats.cycles + 1
+        S.cyc = S.cyc + 1
+        StatusText = "Running (cycle " .. S.cyc .. ")"
 
-        if CONFIG.AUTO_BUY_SEEDS then
-            auto_buy_seeds()
+        -- Buy seeds every few cycles (shop restocks every 5 min)
+        buy_timer = buy_timer + CFG.LOOP_DELAY
+        if buy_timer >= CFG.BUY_INTERVAL then
+            do_buy()
+            buy_timer = 0
         end
 
-        if CONFIG.AUTO_TAME_PETS then
-            auto_tame_pets()
+        -- Harvest
+        local h = do_harvest()
+
+        -- Sell if enough crops
+        if h and h > 0 then
+            do_sell()
         end
 
-        if CONFIG.AUTO_EVENT then
-            auto_collect_events()
+        -- Tame pets
+        do_tame()
+
+        -- Events
+        do_event()
+
+        -- Re-scan remotes if we haven't found GameEvents yet
+        if not GE and S.cyc % 15 == 0 then
+            find_remotes()
         end
 
-        if Stats.cycles % 5 == 0 then print_status() end
-        safe_wait(CONFIG.SCAN_DELAY)
+        if S.cyc % 5 == 0 then
+            log(string.format("[%d] Buy:%d Harv:%d Sell:%d Tame:%d Evt:%d Err:%d | %d Sheckles",
+                S.cyc, S.buy, S.harv, S.sell, S.tame, S.evt, S.err, sheckles()))
+        end
+
+        StatusText = "Waiting..."
+        sw(CFG.LOOP_DELAY)
     end
 
     if afk_conn then afk_conn:Disconnect() end
-    log("=== Script Stopped ===")
-    print_status()
+    log("=== Stopped ===")
 end
 
---------------------------------------------------------------
--- CONTROLS
 --------------------------------------------------------------
 local function start()
-    if Running then log("Already running!") return end
+    if Running then return end
     Running = true
-    task.spawn(main_loop)
+    task.spawn(main)
 end
-
 local function stop()
     Running = false
-    log("Stopping...")
 end
 
 --------------------------------------------------------------
 -- GUI
 --------------------------------------------------------------
-local function create_gui()
-    local ok, _ = pcall(function()
-        local screen = Instance.new("ScreenGui")
-        screen.Name = "GAG2_Kenshi"
-        screen.ResetOnSpawn = false
-        screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-        pcall(function() screen.Parent = game:GetService("CoreGui") end)
-        if not screen.Parent then
-            screen.Parent = PlayerGui
-        end
+pcall(function()
+    local old = game:GetService("CoreGui"):FindFirstChild("GAG2K")
+    if old then old:Destroy() end
+end)
+pcall(function()
+    local old = PGui:FindFirstChild("GAG2K")
+    if old then old:Destroy() end
+end)
 
-        local frame = Instance.new("Frame")
-        frame.Name = "MainFrame"
-        frame.Size = UDim2.new(0, 240, 0, 250)
-        frame.Position = UDim2.new(0, 10, 0.5, -125)
-        frame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
-        frame.BackgroundTransparency = 0.1
-        frame.BorderSizePixel = 0
-        frame.Parent = screen
+local scr = Instance.new("ScreenGui")
+scr.Name = "GAG2K"
+scr.ResetOnSpawn = false
+scr.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+pcall(function() scr.Parent = game:GetService("CoreGui") end)
+if not scr.Parent then scr.Parent = PGui end
 
-        Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+local fr = Instance.new("Frame")
+fr.Size = UDim2.new(0, 220, 0, 340)
+fr.Position = UDim2.new(0, 10, 0.5, -170)
+fr.BackgroundColor3 = Color3.fromRGB(18, 18, 28)
+fr.BackgroundTransparency = 0.05
+fr.BorderSizePixel = 0
+fr.Parent = scr
+Instance.new("UICorner", fr).CornerRadius = UDim.new(0, 8)
 
-        local title = Instance.new("TextLabel")
-        title.Size = UDim2.new(1, 0, 0, 32)
-        title.BackgroundColor3 = Color3.fromRGB(80, 40, 120)
-        title.BackgroundTransparency = 0
-        title.Text = "GAG2 Kenshi"
-        title.TextColor3 = Color3.fromRGB(255, 255, 255)
-        title.TextSize = 16
-        title.Font = Enum.Font.GothamBold
-        title.BorderSizePixel = 0
-        title.Parent = frame
-        Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
+local tt = Instance.new("TextLabel")
+tt.Size = UDim2.new(1, 0, 0, 28)
+tt.BackgroundColor3 = Color3.fromRGB(100, 50, 150)
+tt.Text = "GAG2 Kenshi v3"
+tt.TextColor3 = Color3.new(1, 1, 1)
+tt.TextSize = 14
+tt.Font = Enum.Font.GothamBold
+tt.BorderSizePixel = 0
+tt.Parent = fr
+Instance.new("UICorner", tt).CornerRadius = UDim.new(0, 8)
 
-        local function make_toggle(name, y, default_on, on_change)
-            local btn = Instance.new("TextButton")
-            btn.Size = UDim2.new(0.9, 0, 0, 30)
-            btn.Position = UDim2.new(0.05, 0, 0, y)
-            btn.BackgroundColor3 = default_on and Color3.fromRGB(40, 120, 40) or Color3.fromRGB(100, 35, 35)
-            btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-            btn.TextSize = 13
-            btn.Font = Enum.Font.Gotham
-            btn.Text = name .. ": " .. (default_on and "ON" or "OFF")
-            btn.BorderSizePixel = 0
-            btn.Parent = frame
-            Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
-            local state = default_on
-            btn.MouseButton1Click:Connect(function()
-                state = not state
-                btn.Text = name .. ": " .. (state and "ON" or "OFF")
-                btn.BackgroundColor3 = state and Color3.fromRGB(40, 120, 40) or Color3.fromRGB(100, 35, 35)
-                on_change(state)
-            end)
-            return btn
-        end
-
-        make_toggle("Start/Stop", 38, false, function(on)
-            if on then start() else stop() end
-        end)
-
-        make_toggle("Auto Buy Seeds", 73, CONFIG.AUTO_BUY_SEEDS, function(on)
-            CONFIG.AUTO_BUY_SEEDS = on
-        end)
-
-        make_toggle("Auto Tame Pets", 108, CONFIG.AUTO_TAME_PETS, function(on)
-            CONFIG.AUTO_TAME_PETS = on
-        end)
-
-        make_toggle("Auto Event Seeds", 143, CONFIG.AUTO_EVENT, function(on)
-            CONFIG.AUTO_EVENT = on
-        end)
-
-        local money_label = Instance.new("TextLabel")
-        money_label.Size = UDim2.new(0.9, 0, 0, 22)
-        money_label.Position = UDim2.new(0.05, 0, 0, 180)
-        money_label.BackgroundTransparency = 1
-        money_label.Text = "Sheckles: ..."
-        money_label.TextColor3 = Color3.fromRGB(255, 215, 0)
-        money_label.TextSize = 12
-        money_label.Font = Enum.Font.GothamBold
-        money_label.TextXAlignment = Enum.TextXAlignment.Left
-        money_label.Parent = frame
-
-        local status_label = Instance.new("TextLabel")
-        status_label.Size = UDim2.new(0.9, 0, 0, 20)
-        status_label.Position = UDim2.new(0.05, 0, 0, 200)
-        status_label.BackgroundTransparency = 1
-        status_label.Text = "Ready"
-        status_label.TextColor3 = Color3.fromRGB(180, 180, 180)
-        status_label.TextSize = 11
-        status_label.Font = Enum.Font.Gotham
-        status_label.TextXAlignment = Enum.TextXAlignment.Left
-        status_label.Parent = frame
-
-        local credits = Instance.new("TextLabel")
-        credits.Size = UDim2.new(1, 0, 0, 18)
-        credits.Position = UDim2.new(0, 0, 0, 230)
-        credits.BackgroundTransparency = 1
-        credits.Text = "by ryuken25 | Kenshi Injector"
-        credits.TextColor3 = Color3.fromRGB(120, 120, 140)
-        credits.TextSize = 10
-        credits.Font = Enum.Font.Gotham
-        credits.Parent = frame
-
-        task.spawn(function()
-            while screen.Parent do
-                local shk = get_currency("Sheckles")
-                money_label.Text = "Sheckles: " .. tostring(shk)
-                status_label.Text = string.format("S:%d P:%d E:%d C:%d",
-                    Stats.seeds_bought, Stats.pets_tamed, Stats.events_collected, Stats.cycles)
-                task.wait(1)
-            end
-        end)
-
-        -- Draggable
-        local dragging, dragStart, startPos
-        frame.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 or
-               input.UserInputType == Enum.UserInputType.Touch then
-                dragging = true
-                dragStart = input.Position
-                startPos = frame.Position
-                input.Changed:Connect(function()
-                    if input.UserInputState == Enum.UserInputState.End then dragging = false end
-                end)
-            end
-        end)
-        frame.InputChanged:Connect(function(input)
-            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or
-                             input.UserInputType == Enum.UserInputType.Touch) then
-                local delta = input.Position - dragStart
-                frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
-                                           startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-            end
-        end)
+local y = 34
+local function mkbtn(label, def, cb)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0.9, 0, 0, 26)
+    b.Position = UDim2.new(0.05, 0, 0, y)
+    b.BackgroundColor3 = def and Color3.fromRGB(35, 110, 35) or Color3.fromRGB(110, 30, 30)
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.TextSize = 12
+    b.Font = Enum.Font.Gotham
+    b.Text = label .. ": " .. (def and "ON" or "OFF")
+    b.BorderSizePixel = 0
+    b.Parent = fr
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
+    local st = def
+    b.MouseButton1Click:Connect(function()
+        st = not st
+        b.Text = label .. ": " .. (st and "ON" or "OFF")
+        b.BackgroundColor3 = st and Color3.fromRGB(35, 110, 35) or Color3.fromRGB(110, 30, 30)
+        cb(st)
     end)
-
-    if ok then
-        log("GUI created")
-    else
-        log("GUI failed — use GAG2_Start() / GAG2_Stop() from console")
-    end
+    y = y + 30
 end
+
+mkbtn("START / STOP", false, function(v) if v then start() else stop() end end)
+mkbtn("Auto Buy Seeds", CFG.AUTO_BUY, function(v) CFG.AUTO_BUY = v end)
+mkbtn("Auto Harvest", CFG.AUTO_HARVEST, function(v) CFG.AUTO_HARVEST = v end)
+mkbtn("Auto Sell", CFG.AUTO_SELL, function(v) CFG.AUTO_SELL = v end)
+mkbtn("Auto Tame Pets", CFG.AUTO_TAME, function(v) CFG.AUTO_TAME = v end)
+mkbtn("Auto Event", CFG.AUTO_EVENT, function(v) CFG.AUTO_EVENT = v end)
+
+local ml = Instance.new("TextLabel")
+ml.Size = UDim2.new(0.9, 0, 0, 16)
+ml.Position = UDim2.new(0.05, 0, 0, y + 4)
+ml.BackgroundTransparency = 1
+ml.TextColor3 = Color3.fromRGB(255, 215, 0)
+ml.TextSize = 11
+ml.Font = Enum.Font.GothamBold
+ml.TextXAlignment = Enum.TextXAlignment.Left
+ml.Text = "Sheckles: ..."
+ml.Parent = fr
+
+local sl = Instance.new("TextLabel")
+sl.Size = UDim2.new(0.9, 0, 0, 14)
+sl.Position = UDim2.new(0.05, 0, 0, y + 22)
+sl.BackgroundTransparency = 1
+sl.TextColor3 = Color3.fromRGB(160, 160, 170)
+sl.TextSize = 10
+sl.Font = Enum.Font.Gotham
+sl.TextXAlignment = Enum.TextXAlignment.Left
+sl.Text = "Ready"
+sl.Parent = fr
+
+local stl = Instance.new("TextLabel")
+stl.Size = UDim2.new(0.9, 0, 0, 14)
+stl.Position = UDim2.new(0.05, 0, 0, y + 38)
+stl.BackgroundTransparency = 1
+stl.TextColor3 = Color3.fromRGB(130, 200, 255)
+stl.TextSize = 10
+stl.Font = Enum.Font.Gotham
+stl.TextXAlignment = Enum.TextXAlignment.Left
+stl.Text = ""
+stl.Parent = fr
+
+local cr = Instance.new("TextLabel")
+cr.Size = UDim2.new(1, 0, 0, 14)
+cr.Position = UDim2.new(0, 0, 1, -16)
+cr.BackgroundTransparency = 1
+cr.Text = "ryuken25 | Kenshi"
+cr.TextColor3 = Color3.fromRGB(80, 80, 90)
+cr.TextSize = 9
+cr.Font = Enum.Font.Gotham
+cr.Parent = fr
+
+task.spawn(function()
+    while scr.Parent do
+        ml.Text = "Sheckles: " .. tostring(sheckles())
+        sl.Text = string.format("Buy:%d Harv:%d Sell:%d Tame:%d Evt:%d",
+            S.buy, S.harv, S.sell, S.tame, S.evt)
+        stl.Text = StatusText
+        task.wait(0.6)
+    end
+end)
+
+-- Drag
+local drag, ds, sp
+fr.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        drag = true; ds = i.Position; sp = fr.Position
+        i.Changed:Connect(function() if i.UserInputState == Enum.UserInputState.End then drag = false end end)
+    end
+end)
+fr.InputChanged:Connect(function(i)
+    if drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - ds
+        fr.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X, sp.Y.Scale, sp.Y.Offset + d.Y)
+    end
+end)
 
 --------------------------------------------------------------
 -- INIT
 --------------------------------------------------------------
-log("=== GAG2 Auto Buy & Tame v2.0 (Kenshi) ===")
+log("=== GAG2 Kenshi v3.0 ===")
+log("PlaceId: " .. tostring(game.PlaceId))
 
 getgenv().GAG2_Start  = start
 getgenv().GAG2_Stop   = stop
-getgenv().GAG2_Stats  = Stats
-getgenv().GAG2_Config = CONFIG
+getgenv().GAG2_Stats  = S
+getgenv().GAG2_Config = CFG
 
-create_gui()
-log("GUI loaded. Click 'Start/Stop' to begin.")
+log("GUI loaded — click START to run")
