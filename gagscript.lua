@@ -1,6 +1,11 @@
 --[[
-    Grow a Garden 2 — BRUTAL v6 (Kenshi)
-    6 threads, error recovery, auto-start, shows remotes in GUI
+    Grow a Garden 2 — BRUTAL v7 (Kenshi)
+    ProximityPrompt + GUI dialog automation
+
+    SELL = TP to Steven → fire ProximityPrompt → click "Sell Inventory" dialog
+    BUY  = TP to Sam → fire ProximityPrompt → click Bamboo in shop GUI
+    GEAR = TP to George → fire ProximityPrompt → click Trowel in gear GUI
+
     Usage: loadstring(game:HttpGet("https://raw.githubusercontent.com/ryuken25/gagscript/main/gagscript.lua"))()
 ]]
 
@@ -10,16 +15,17 @@ local WS      = game:GetService("Workspace")
 local VU      = game:GetService("VirtualUser")
 local LP      = Players.LocalPlayer
 local PGui    = LP:WaitForChild("PlayerGui")
-local Backpack= LP:WaitForChild("Backpack")
 local LS      = LP:WaitForChild("leaderstats", 10)
 
 local Running = true
 local S = { harv = 0, sell = 0, buy = 0, gear = 0, tame = 0, evt = 0 }
 local HarvBuf = 0
-local SELL_AT = 100
-local RemoteInfo = "scanning..."
-local ThreadStatus = {}
+local DbgMsg = "INIT"
+local ThreadInfo = {}
 
+--------------------------------------------------------------
+-- UTILS
+--------------------------------------------------------------
 local function shk()
     if not LS then return 0 end
     local s = LS:FindFirstChild("Sheckles")
@@ -33,9 +39,10 @@ end
 local function tp(pos)
     local r = hrp()
     if not r then return end
-    r.CFrame = typeof(pos) == "Vector3" and CFrame.new(pos) or pos
-    task.wait(0.05)
+    r.CFrame = typeof(pos) == "CFrame" and pos or CFrame.new(pos)
+    task.wait(0.1)
 end
+
 local function fp(p)
     if not p or not p:IsA("ProximityPrompt") then return false end
     if typeof(fireproximityprompt) == "function" then
@@ -48,95 +55,109 @@ local function fp(p)
         p:InputHoldEnd()
     end)
 end
-local function fire(re, ...)
-    if not re then return false end
-    if re:IsA("RemoteEvent") then
-        return pcall(function(...) re:FireServer(...) end, ...)
-    elseif re:IsA("RemoteFunction") then
-        return pcall(function(...) re:InvokeServer(...) end, ...)
-    end
-    return false
-end
 
 --------------------------------------------------------------
--- SAFE THREAD — wraps in pcall, auto-restarts on crash
+-- GUI CLICK — firesignal > getconnections > manual
 --------------------------------------------------------------
-local function safe_thread(name, fn)
-    task.spawn(function()
-        while Running do
-            ThreadStatus[name] = "running"
-            local ok, err = pcall(fn)
-            if not ok then
-                ThreadStatus[name] = "ERROR: " .. tostring(err)
-                warn("[GAG2] Thread " .. name .. " crashed: " .. tostring(err))
-                task.wait(2)
+local function click_gui(btn)
+    if not btn then return false end
+    local ok = false
+    if typeof(firesignal) == "function" then
+        pcall(firesignal, btn.MouseButton1Click)
+        pcall(firesignal, btn.Activated)
+        ok = true
+    end
+    if typeof(getconnections) == "function" then
+        local function fc(sig)
+            for _, c in ipairs(getconnections(sig)) do
+                pcall(function() c:Fire() end)
+                ok = true
             end
         end
-        ThreadStatus[name] = "stopped"
-    end)
+        pcall(fc, btn.MouseButton1Click)
+        pcall(fc, btn.Activated)
+    end
+    if not ok then
+        pcall(function() btn.MouseButton1Click:Fire() end)
+    end
+    return true
 end
 
 --------------------------------------------------------------
--- REMOTES
+-- GUI SEARCH
 --------------------------------------------------------------
-local GE
-local AllRemotes = {}
-
-local function find_remote(...)
-    local names = {...}
-    for _, n in ipairs(names) do
-        if GE then
-            local r = GE:FindFirstChild(n)
-            if r then return r end
-        end
-        local r = RS:FindFirstChild(n, true)
-        if r and (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) then return r end
-    end
-    return nil
-end
-
-local function find_remote_pattern(pattern)
-    for _, r in pairs(AllRemotes) do
-        if r.Name:lower():find(pattern) then return r end
-    end
-    return nil
-end
-
-local function init_remotes()
-    GE = RS:FindFirstChild("GameEvents")
-    if not GE then
-        for _, f in ipairs(RS:GetChildren()) do
-            if f:IsA("Folder") then
-                for _, c in ipairs(f:GetChildren()) do
-                    if c:IsA("RemoteEvent") or c:IsA("RemoteFunction") then
-                        GE = f; break
-                    end
+local function find_btns(keywords, parent)
+    parent = parent or PGui
+    local results = {}
+    for _, d in ipairs(parent:GetDescendants()) do
+        if (d:IsA("TextButton") or d:IsA("ImageButton")) then
+            local name = d.Name:lower()
+            local text = d:IsA("TextButton") and (d.Text or ""):lower() or ""
+            for _, kw in ipairs(keywords) do
+                if name:find(kw) or text:find(kw) then
+                    table.insert(results, d)
+                    break
                 end
-                if GE then break end
             end
         end
     end
+    return results
+end
 
-    AllRemotes = {}
-    local names = {}
-    local search = GE or RS
-    for _, c in ipairs(search:GetDescendants()) do
-        if c:IsA("RemoteEvent") or c:IsA("RemoteFunction") then
-            AllRemotes[c.Name] = c
-            table.insert(names, c.Name)
+local function find_btn(keywords, parent)
+    local r = find_btns(keywords, parent)
+    return r[1]
+end
+
+local function find_label(keywords, parent)
+    parent = parent or PGui
+    for _, d in ipairs(parent:GetDescendants()) do
+        if d:IsA("TextLabel") then
+            local text = (d.Text or ""):lower()
+            for _, kw in ipairs(keywords) do
+                if text:find(kw) then return d end
+            end
         end
     end
+    return nil
+end
 
-    if #names > 0 then
-        RemoteInfo = table.concat(names, ", ")
-        print("[GAG2] Found " .. #names .. " remotes: " .. RemoteInfo)
-    else
-        RemoteInfo = "NONE FOUND"
-        warn("[GAG2] NO REMOTES FOUND")
-        for _, c in ipairs(RS:GetChildren()) do
-            print("[GAG2] RS." .. c.Name .. " [" .. c.ClassName .. "]")
+--------------------------------------------------------------
+-- NPC FINDER
+--------------------------------------------------------------
+local function find_npc(name)
+    local npcs = WS:FindFirstChild("NPCS") or WS:FindFirstChild("NPCs") or WS:FindFirstChild("Npcs")
+    if npcs then
+        local npc = npcs:FindFirstChild(name)
+        if npc then return npc end
+        for _, c in ipairs(npcs:GetChildren()) do
+            if c.Name:lower() == name:lower() then return c end
         end
     end
+    for _, d in ipairs(WS:GetChildren()) do
+        if d:IsA("Model") and d.Name == name then return d end
+    end
+    return nil
+end
+
+local function npc_pos(npc)
+    if not npc then return nil end
+    local p = npc.PrimaryPart or npc:FindFirstChildOfClass("BasePart")
+    return p and p.Position
+end
+
+local function npc_prompt(npc)
+    if not npc then return nil end
+    return npc:FindFirstChild("ProximityPrompt", true)
+end
+
+--------------------------------------------------------------
+-- INVENTORY FULL CHECK
+--------------------------------------------------------------
+local function is_inv_full()
+    local lbl = find_label({"inventory is full", "inventory full"})
+    if lbl then return true end
+    return false
 end
 
 --------------------------------------------------------------
@@ -164,11 +185,262 @@ local function find_farm()
 end
 
 --------------------------------------------------------------
+-- SAFE THREAD
+--------------------------------------------------------------
+local function safe_thread(name, fn)
+    task.spawn(function()
+        while Running do
+            ThreadInfo[name] = "run"
+            local ok, err = pcall(fn)
+            if not ok then
+                ThreadInfo[name] = "ERR"
+                warn("[GAG2] " .. name .. " crash: " .. tostring(err))
+                task.wait(2)
+            end
+        end
+        ThreadInfo[name] = "off"
+    end)
+end
+
+--------------------------------------------------------------
+-- SELL — ProximityPrompt → Dialog → "Sell Inventory"
+--------------------------------------------------------------
+local function do_sell()
+    local before = shk()
+    local savedPos = hrp() and hrp().CFrame
+    DbgMsg = "SELLING..."
+
+    -- METHOD 1: Top bar Sell button shortcut
+    local topSell = find_btn({"sell"})
+    if topSell then
+        print("[GAG2] Clicking top bar Sell button: " .. topSell:GetFullName())
+        click_gui(topSell)
+        task.wait(0.8)
+    end
+
+    -- METHOD 2: Teleport to Steven + ProximityPrompt
+    local steven = find_npc("Steven")
+    if steven then
+        local pos = npc_pos(steven)
+        if pos then
+            tp(pos + Vector3.new(0, 3, 0))
+            task.wait(0.3)
+        end
+        local prompt = npc_prompt(steven)
+        if prompt then
+            print("[GAG2] Firing Steven ProximityPrompt")
+            fp(prompt)
+            task.wait(0.8)
+        end
+    else
+        tp(Vector3.new(62, 4, -26))
+        task.wait(0.3)
+        local r = hrp()
+        if r then
+            for _, d in ipairs(WS:GetDescendants()) do
+                if d:IsA("ProximityPrompt") then
+                    local par = d.Parent
+                    local pos = par and par:IsA("BasePart") and par.Position
+                    if not pos and par:IsA("Model") then
+                        local pp = par.PrimaryPart or par:FindFirstChildOfClass("BasePart")
+                        if pp then pos = pp.Position end
+                    end
+                    if pos and (pos - r.Position).Magnitude < 20 then
+                        fp(d)
+                        task.wait(0.5)
+                    end
+                end
+            end
+        end
+    end
+
+    -- STEP 2: Find and click "Sell Inventory" in the dialog
+    task.wait(0.3)
+    local sellInvBtn = find_btn({"sell inventory", "sellinventory", "sell_inventory"})
+    if sellInvBtn then
+        print("[GAG2] Found 'Sell Inventory' button: " .. sellInvBtn:GetFullName())
+        click_gui(sellInvBtn)
+        task.wait(0.5)
+    else
+        -- Broader search: any button with "sell" that appeared
+        local sellBtns = find_btns({"sell"})
+        for _, btn in ipairs(sellBtns) do
+            local txt = btn:IsA("TextButton") and (btn.Text or ""):lower() or btn.Name:lower()
+            -- Skip the top bar sell button, click dialog ones
+            if txt:find("inventory") or txt:find("all") or txt == "sell" then
+                print("[GAG2] Clicking sell dialog button: " .. btn:GetFullName() .. " text=" .. tostring(btn:IsA("TextButton") and btn.Text))
+                click_gui(btn)
+                task.wait(0.3)
+            end
+        end
+    end
+
+    -- STEP 3: Click any confirm/accept buttons
+    task.wait(0.3)
+    local confirmBtn = find_btn({"confirm", "accept", "yes", "ok"})
+    if confirmBtn then
+        print("[GAG2] Clicking confirm: " .. confirmBtn:GetFullName())
+        click_gui(confirmBtn)
+        task.wait(0.3)
+    end
+
+    task.wait(0.5)
+    local after = shk()
+    local gained = after - before
+
+    if gained > 0 then
+        S.sell = S.sell + 1
+        print("[GAG2] SOLD! +" .. gained .. " | Total: " .. after)
+        DbgMsg = "SOLD +" .. gained
+    else
+        print("[GAG2] Sell attempt — no change. Before=" .. before .. " After=" .. after)
+        -- Debug: dump all visible buttons
+        print("[GAG2] == CURRENT BUTTONS ==")
+        for _, d in ipairs(PGui:GetDescendants()) do
+            if d:IsA("TextButton") and d.Visible ~= false then
+                print("[GAG2] BTN: \"" .. (d.Text or "?") .. "\" @ " .. d:GetFullName())
+            end
+        end
+        DbgMsg = "SELL MISS"
+    end
+
+    HarvBuf = 0
+    if savedPos then tp(savedPos) end
+    return gained > 0
+end
+
+--------------------------------------------------------------
+-- BUY SEEDS — ProximityPrompt on Sam → shop GUI → Bamboo
+--------------------------------------------------------------
+local function do_buy_bamboo()
+    local before = shk()
+
+    -- Find Sam NPC
+    local sam = find_npc("Sam")
+    if sam then
+        local pos = npc_pos(sam)
+        if pos then
+            tp(pos + Vector3.new(0, 3, 0))
+            task.wait(0.3)
+        end
+        local prompt = npc_prompt(sam)
+        if prompt then
+            fp(prompt)
+            task.wait(0.8)
+        end
+    end
+
+    -- Also try clicking Seeds button in top bar
+    local seedBtn = find_btn({"seed"})
+    if seedBtn then
+        click_gui(seedBtn)
+        task.wait(0.5)
+    end
+
+    -- Find Bamboo in shop GUI and click buy
+    task.wait(0.3)
+    local bambooBtn = find_btn({"bamboo"})
+    if bambooBtn then
+        print("[GAG2] Clicking Bamboo button: " .. bambooBtn:GetFullName())
+        click_gui(bambooBtn)
+        task.wait(0.3)
+        -- Look for a buy/confirm after clicking bamboo
+        local buyBtn = find_btn({"buy", "purchase", "confirm", "yes"})
+        if buyBtn then
+            click_gui(buyBtn)
+            task.wait(0.2)
+        end
+    else
+        -- Try finding bamboo label and clicking nearby buy button
+        local lbl = find_label({"bamboo"})
+        if lbl then
+            print("[GAG2] Found Bamboo label: " .. lbl:GetFullName())
+            local parent = lbl.Parent
+            if parent then
+                local buyBtn = find_btn({"buy", "purchase", "get"}, parent)
+                if buyBtn then
+                    click_gui(buyBtn)
+                    task.wait(0.3)
+                end
+            end
+        end
+    end
+
+    -- Close shop if open (press cancel/close/X)
+    task.wait(0.2)
+    local closeBtn = find_btn({"close", "cancel", "exit", "x"})
+    if closeBtn then click_gui(closeBtn) end
+
+    local after = shk()
+    if after < before then
+        S.buy = S.buy + 1
+        print("[GAG2] BOUGHT Bamboo! -" .. (before - after))
+        return true
+    end
+    return false
+end
+
+--------------------------------------------------------------
+-- BUY GEAR — ProximityPrompt on George → gear GUI → Trowel
+--------------------------------------------------------------
+local function do_buy_trowel()
+    local before = shk()
+
+    local george = find_npc("George")
+    if george then
+        local pos = npc_pos(george)
+        if pos then
+            tp(pos + Vector3.new(0, 3, 0))
+            task.wait(0.3)
+        end
+        local prompt = npc_prompt(george)
+        if prompt then
+            fp(prompt)
+            task.wait(0.8)
+        end
+    end
+
+    -- Also try Gear button in top bar
+    local gearBtn = find_btn({"gear"})
+    if gearBtn then
+        click_gui(gearBtn)
+        task.wait(0.5)
+    end
+
+    -- Find Trowel and click buy
+    task.wait(0.3)
+    local trowelBtn = find_btn({"trowel"})
+    if trowelBtn then
+        click_gui(trowelBtn)
+        task.wait(0.3)
+        local buyBtn = find_btn({"buy", "purchase", "confirm"})
+        if buyBtn then click_gui(buyBtn); task.wait(0.2) end
+    else
+        local lbl = find_label({"trowel"})
+        if lbl and lbl.Parent then
+            local buyBtn = find_btn({"buy", "purchase"}, lbl.Parent)
+            if buyBtn then click_gui(buyBtn); task.wait(0.3) end
+        end
+    end
+
+    local closeBtn = find_btn({"close", "cancel", "exit"})
+    if closeBtn then click_gui(closeBtn) end
+
+    local after = shk()
+    if after < before then
+        S.gear = S.gear + 1
+        print("[GAG2] BOUGHT Trowel! -" .. (before - after))
+        return true
+    end
+    return false
+end
+
+--------------------------------------------------------------
 -- T1: HARVEST
 --------------------------------------------------------------
 local function thread_harvest()
     while Running do
-        ThreadStatus["harvest"] = "scanning"
+        ThreadInfo["harv"] = "scan"
         local farm = find_farm()
         local count = 0
 
@@ -194,130 +466,30 @@ local function thread_harvest()
             end
         end
 
-        local r = hrp()
-        if r then
-            for _, d in ipairs(WS:GetDescendants()) do
-                if not Running then return end
-                if d:IsA("ProximityPrompt") and d.Enabled then
-                    local par = d.Parent
-                    if par and par:IsA("BasePart") and (par.Position - r.Position).Magnitude < 40 then
-                        tp(par.Position + Vector3.new(0, 2, 0))
-                        if fp(d) then count = count + 1 end
-                        task.wait(0.05)
-                    end
-                end
-            end
-        end
-
         S.harv = S.harv + count
         HarvBuf = HarvBuf + count
-        ThreadStatus["harvest"] = "H+" .. count
+        ThreadInfo["harv"] = "+" .. count
         task.wait(0.3)
     end
 end
 
 --------------------------------------------------------------
--- T2: SELL (every 100 harvests)
+-- T2: SELL — on inventory full OR buffer >= 50
 --------------------------------------------------------------
 local function thread_sell()
     while Running do
-        if HarvBuf >= SELL_AT then
-            ThreadStatus["sell"] = "SELLING"
-            print("[GAG2] SELL triggered at " .. HarvBuf .. " harvests")
-            local prev = hrp() and hrp().CFrame
+        local invFull = is_inv_full()
+        local bufReady = HarvBuf >= 50
 
-            -- Try teleport to sell NPC
-            local npcs = WS:FindFirstChild("NPCS") or WS:FindFirstChild("NPCs") or WS:FindFirstChild("Npcs")
-            if npcs then
-                local npc = npcs:FindFirstChild("Steven") or npcs:FindFirstChild("Sell")
-                    or npcs:FindFirstChild("sell") or npcs:FindFirstChild("Merchant")
-                if npc then
-                    local part = npc.PrimaryPart or npc:FindFirstChildOfClass("BasePart")
-                    if part then tp(part.Position + Vector3.new(0, 3, 0)); task.wait(0.2) end
-                end
-            else
-                tp(Vector3.new(62, 4, -26)); task.wait(0.2)
-            end
-
-            -- Try ALL sell-like remotes
-            local sold = false
-            local sell_names = {"Sell_Inventory", "SellInventory", "Sell_Item", "SellAll", "Sell", "SellCrops"}
-            for _, name in ipairs(sell_names) do
-                local re = find_remote(name)
-                if re then
-                    local before = shk()
-                    fire(re); task.wait(0.1)
-                    fire(re); task.wait(0.1)
-                    fire(re); task.wait(0.1)
-                    local after = shk()
-                    if after > before then
-                        S.sell = S.sell + 1
-                        print("[GAG2] SOLD via " .. name .. "! +" .. (after-before) .. " | Bal: " .. after)
-                        sold = true
-                        break
-                    end
-                end
-            end
-
-            -- Pattern fallback
-            if not sold then
-                local re = find_remote_pattern("sell")
-                if re then
-                    fire(re); task.wait(0.1)
-                    fire(re); task.wait(0.1)
-                    fire(re); task.wait(0.1)
-                    S.sell = S.sell + 1
-                    print("[GAG2] Sold via pattern: " .. re.Name)
-                    sold = true
-                end
-            end
-
-            -- Proximity prompt fallback
-            if not sold then
-                local r = hrp()
-                if r then
-                    for _, d in ipairs(WS:GetDescendants()) do
-                        if d:IsA("ProximityPrompt") then
-                            local par = d.Parent
-                            if par and par:IsA("BasePart") and (par.Position - r.Position).Magnitude < 20 then
-                                local n = (d.ActionText or d.ObjectText or d.Parent.Name or ""):lower()
-                                if n:find("sell") or n:find("trade") or n:find("exchange") or n == "" then
-                                    fp(d)
-                                    S.sell = S.sell + 1
-                                    print("[GAG2] Sold via proximity prompt")
-                                    sold = true
-                                    break
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-
-            if not sold then
-                -- Nuclear: fire EVERY remote and check if sheckles went up
-                local before = shk()
-                for _, re in pairs(AllRemotes) do
-                    if re.Name:lower():find("sell") then
-                        fire(re)
-                        task.wait(0.05)
-                    end
-                end
-                task.wait(0.3)
-                local after = shk()
-                if after > before then
-                    S.sell = S.sell + 1
-                    print("[GAG2] Sold via nuclear scan! +" .. (after-before))
-                else
-                    print("[GAG2] SELL FAILED — no sell remote worked. Remotes: " .. RemoteInfo)
-                end
-            end
-
-            HarvBuf = 0
-            if prev then tp(prev) end
+        if invFull or bufReady then
+            ThreadInfo["sell"] = invFull and "INV FULL!" or "buf:" .. HarvBuf
+            print("[GAG2] Sell trigger: " .. (invFull and "INVENTORY FULL" or "buffer=" .. HarvBuf))
+            do_sell()
+            task.wait(2)
+        else
+            ThreadInfo["sell"] = "buf:" .. HarvBuf
         end
-        ThreadStatus["sell"] = "buf:" .. HarvBuf .. "/" .. SELL_AT
-        task.wait(0.5)
+        task.wait(1)
     end
 end
 
@@ -326,50 +498,13 @@ end
 --------------------------------------------------------------
 local function thread_buy()
     while Running do
-        ThreadStatus["buy"] = "checking"
-
-        -- Try buying Bamboo
-        local buy_re = find_remote("BuySeedStock", "BuySeed", "Buy_Seed", "BuyStock")
-            or find_remote_pattern("buy.*seed") or find_remote_pattern("seed.*buy")
-            or find_remote_pattern("buy")
-        if buy_re then
-            local before = shk()
-            fire(buy_re, "Bamboo")
-            task.wait(0.1)
-            local after = shk()
-            if after < before then
-                S.buy = S.buy + 1
-                ThreadStatus["buy"] = "BAMBOO!"
-                print("[GAG2] BOUGHT Bamboo via " .. buy_re.Name .. "! -" .. (before-after))
-                for i = 1, 30 do
-                    if not Running then return end
-                    local b = shk()
-                    fire(buy_re, "Bamboo")
-                    task.wait(0.06)
-                    if shk() >= b then break end
-                    S.buy = S.buy + 1
-                end
-                print("[GAG2] Bamboo total: " .. S.buy)
-            end
-        else
-            ThreadStatus["buy"] = "no buy remote"
-        end
-
-        -- Try buying Trowel
-        local gear_re = find_remote("BuyGearStock", "BuyGear", "Buy_Gear")
-            or find_remote_pattern("gear") or find_remote_pattern("buy.*gear")
-        if gear_re then
-            local before = shk()
-            fire(gear_re, "Trowel")
-            task.wait(0.1)
-            local after = shk()
-            if after < before then
-                S.gear = S.gear + 1
-                print("[GAG2] BOUGHT Trowel via " .. gear_re.Name .. "!")
-            end
-        end
-
-        task.wait(3)
+        ThreadInfo["buy"] = "bamboo"
+        do_buy_bamboo()
+        task.wait(2)
+        ThreadInfo["buy"] = "trowel"
+        do_buy_trowel()
+        ThreadInfo["buy"] = "wait"
+        task.wait(8)
     end
 end
 
@@ -384,26 +519,26 @@ end
 
 local function thread_pets()
     while Running do
-        ThreadStatus["pets"] = "scanning"
+        ThreadInfo["pets"] = "scan"
         for _, d in ipairs(WS:GetDescendants()) do
             if not Running then return end
             if d:IsA("Model") and is_wanted(d.Name) then
                 local prompt = d:FindFirstChild("ProximityPrompt", true)
                 if prompt and prompt:IsA("ProximityPrompt") then
-                    ThreadStatus["pets"] = "FOUND: " .. d.Name
-                    print("[GAG2] PET: " .. d.Name .. " FOUND!")
+                    ThreadInfo["pets"] = d.Name
+                    print("[GAG2] PET FOUND: " .. d.Name)
                     local part = d.PrimaryPart or d:FindFirstChildOfClass("BasePart")
                     if part then tp(part.Position + Vector3.new(0, 2, 0)); task.wait(0.1) end
                     if fp(prompt) then
                         S.tame = S.tame + 1
-                        print("[GAG2] TAMED: " .. d.Name .. "!")
+                        print("[GAG2] TAMED: " .. d.Name)
                     end
-                    task.wait(0.2)
+                    task.wait(0.3)
                 end
             end
         end
-        ThreadStatus["pets"] = "idle"
-        task.wait(2)
+        ThreadInfo["pets"] = "idle"
+        task.wait(3)
     end
 end
 
@@ -412,7 +547,7 @@ end
 --------------------------------------------------------------
 local function thread_events()
     while Running do
-        ThreadStatus["events"] = "scanning"
+        ThreadInfo["evt"] = "scan"
         for _, d in ipairs(WS:GetDescendants()) do
             if not Running then return end
             if d:IsA("ProximityPrompt") and d.Enabled then
@@ -426,18 +561,18 @@ local function thread_events()
                     if pos then
                         tp(pos + Vector3.new(0, 2, 0))
                         if fp(d) then S.evt = S.evt + 1 end
-                        task.wait(0.05)
+                        task.wait(0.1)
                     end
                 end
             end
         end
-        ThreadStatus["events"] = "idle"
+        ThreadInfo["evt"] = "idle"
         task.wait(5)
     end
 end
 
 --------------------------------------------------------------
--- T6: ANTI-AFK
+-- ANTI-AFK
 --------------------------------------------------------------
 LP.Idled:Connect(function()
     if VU then VU:CaptureController(); VU:ClickButton2(Vector2.new()) end
@@ -455,8 +590,8 @@ pcall(function() scr.Parent = game:GetService("CoreGui") end)
 if not scr.Parent then scr.Parent = PGui end
 
 local fr = Instance.new("Frame")
-fr.Size = UDim2.new(0, 210, 0, 280)
-fr.Position = UDim2.new(0, 8, 0.5, -140)
+fr.Size = UDim2.new(0, 220, 0, 255)
+fr.Position = UDim2.new(0, 8, 0.5, -128)
 fr.BackgroundColor3 = Color3.fromRGB(10, 10, 18)
 fr.BackgroundTransparency = 0.05
 fr.BorderSizePixel = 0; fr.Parent = scr
@@ -464,9 +599,10 @@ Instance.new("UICorner", fr).CornerRadius = UDim.new(0, 8)
 
 local hdr = Instance.new("TextLabel")
 hdr.Size = UDim2.new(1, 0, 0, 22)
-hdr.BackgroundColor3 = Color3.fromRGB(160, 10, 10)
-hdr.Text = "GAG2 BRUTAL v6"; hdr.TextColor3 = Color3.new(1, 1, 1)
-hdr.TextSize = 12; hdr.Font = Enum.Font.GothamBold
+hdr.BackgroundColor3 = Color3.fromRGB(180, 20, 20)
+hdr.Text = "GAG2 v7 — ProximityPrompt + GUI"
+hdr.TextColor3 = Color3.new(1, 1, 1)
+hdr.TextSize = 10; hdr.Font = Enum.Font.GothamBold
 hdr.BorderSizePixel = 0; hdr.Parent = fr
 Instance.new("UICorner", hdr).CornerRadius = UDim.new(0, 8)
 
@@ -478,77 +614,96 @@ local function lbl(yp, col)
     l.TextColor3 = col; l.TextSize = 9
     l.Font = Enum.Font.Gotham
     l.TextXAlignment = Enum.TextXAlignment.Left
+    l.TextWrapped = true
     l.Text = ""; l.Parent = fr; return l
 end
 
 local l_money   = lbl(25, Color3.fromRGB(255, 215, 0))
 local l_harv    = lbl(40, Color3.fromRGB(100, 255, 100))
-local l_sell    = lbl(55, Color3.fromRGB(100, 200, 255))
-local l_buy     = lbl(70, Color3.fromRGB(255, 150, 50))
-local l_pet     = lbl(85, Color3.fromRGB(200, 100, 255))
-local l_evt     = lbl(100, Color3.fromRGB(150, 255, 200))
-local l_status  = lbl(115, Color3.fromRGB(255, 80, 80))
-local l_remote  = lbl(132, Color3.fromRGB(120, 120, 140))
-local l_tstat   = lbl(147, Color3.fromRGB(90, 90, 110))
+local l_stats   = lbl(55, Color3.fromRGB(100, 200, 255))
+local l_stats2  = lbl(70, Color3.fromRGB(200, 100, 255))
+local l_dbg     = lbl(85, Color3.fromRGB(255, 80, 80))
+local l_threads = lbl(100, Color3.fromRGB(90, 90, 110))
+local l_npcs    = lbl(115, Color3.fromRGB(80, 80, 100))
 
--- Toggle button
+-- Toggle START/STOP
 local togbtn = Instance.new("TextButton")
-togbtn.Size = UDim2.new(0.94, 0, 0, 26)
-togbtn.Position = UDim2.new(0.03, 0, 0, 165)
+togbtn.Size = UDim2.new(0.45, 0, 0, 26)
+togbtn.Position = UDim2.new(0.03, 0, 0, 133)
 togbtn.BackgroundColor3 = Color3.fromRGB(30, 100, 30)
 togbtn.TextColor3 = Color3.new(1, 1, 1)
-togbtn.TextSize = 12; togbtn.Font = Enum.Font.GothamBold
-togbtn.Text = "RUNNING — tap to STOP"
+togbtn.TextSize = 11; togbtn.Font = Enum.Font.GothamBold
+togbtn.Text = "STOP"
 togbtn.BorderSizePixel = 0; togbtn.Parent = fr
 Instance.new("UICorner", togbtn).CornerRadius = UDim.new(0, 5)
 
-togbtn.MouseButton1Click:Connect(function()
-    Running = not Running
-    if Running then
-        togbtn.Text = "RUNNING — tap to STOP"
-        togbtn.BackgroundColor3 = Color3.fromRGB(30, 100, 30)
-        -- Relaunch threads
-        init_remotes()
-        safe_thread("harvest", thread_harvest)
-        safe_thread("sell", thread_sell)
-        safe_thread("buy", thread_buy)
-        safe_thread("pets", thread_pets)
-        safe_thread("events", thread_events)
-        print("[GAG2] RESTARTED all threads")
-    else
-        togbtn.Text = "STOPPED — tap to START"
-        togbtn.BackgroundColor3 = Color3.fromRGB(100, 25, 25)
-    end
-end)
+-- Manual SELL NOW
+local sellbtn = Instance.new("TextButton")
+sellbtn.Size = UDim2.new(0.45, 0, 0, 26)
+sellbtn.Position = UDim2.new(0.52, 0, 0, 133)
+sellbtn.BackgroundColor3 = Color3.fromRGB(30, 60, 130)
+sellbtn.TextColor3 = Color3.new(1, 1, 1)
+sellbtn.TextSize = 11; sellbtn.Font = Enum.Font.GothamBold
+sellbtn.Text = "SELL NOW"
+sellbtn.BorderSizePixel = 0; sellbtn.Parent = fr
+Instance.new("UICorner", sellbtn).CornerRadius = UDim.new(0, 5)
 
--- Info labels
-local l_info1 = lbl(198, Color3.fromRGB(70, 70, 85))
-local l_info2 = lbl(212, Color3.fromRGB(70, 70, 85))
-local l_info3 = lbl(226, Color3.fromRGB(70, 70, 85))
+-- Info
+local l_info1 = lbl(165, Color3.fromRGB(60, 60, 75))
+local l_info2 = lbl(179, Color3.fromRGB(60, 60, 75))
 
 local cr = Instance.new("TextLabel")
 cr.Size = UDim2.new(1, 0, 0, 10)
 cr.Position = UDim2.new(0, 0, 1, -12)
 cr.BackgroundTransparency = 1
-cr.Text = "ryuken25 | Kenshi"
-cr.TextColor3 = Color3.fromRGB(45, 45, 55)
+cr.Text = "ryuken25 | Kenshi v7"
+cr.TextColor3 = Color3.fromRGB(40, 40, 50)
 cr.TextSize = 8; cr.Font = Enum.Font.Gotham; cr.Parent = fr
 
+sellbtn.MouseButton1Click:Connect(function()
+    task.spawn(function()
+        print("[GAG2] Manual SELL NOW")
+        do_sell()
+    end)
+end)
+
+togbtn.MouseButton1Click:Connect(function()
+    Running = not Running
+    if Running then
+        togbtn.Text = "STOP"
+        togbtn.BackgroundColor3 = Color3.fromRGB(30, 100, 30)
+        safe_thread("harv", thread_harvest)
+        safe_thread("sell", thread_sell)
+        safe_thread("buy", thread_buy)
+        safe_thread("pets", thread_pets)
+        safe_thread("evt", thread_events)
+        print("[GAG2] RESTARTED")
+    else
+        togbtn.Text = "START"
+        togbtn.BackgroundColor3 = Color3.fromRGB(100, 25, 25)
+    end
+end)
+
+-- GUI update loop
 task.spawn(function()
     while scr.Parent do
         l_money.Text = "Sheckles: " .. tostring(shk())
-        l_harv.Text = "Harvest: " .. S.harv .. " | buf: " .. HarvBuf .. "/" .. SELL_AT
-        l_sell.Text = "Sell: " .. S.sell .. " | Buy: " .. S.buy .. " bamboo"
-        l_buy.Text = "Gear: " .. S.gear .. " trowel | Tame: " .. S.tame
-        l_pet.Text = "Events: " .. S.evt
-        l_status.Text = Running and "ALL THREADS ACTIVE" or "STOPPED"
-        l_remote.Text = "Remotes: " .. (string.sub(RemoteInfo, 1, 60))
+        l_harv.Text = "Harvest: " .. S.harv .. " | buf: " .. HarvBuf
+        l_stats.Text = "Sell: " .. S.sell .. " | Buy: " .. S.buy .. " bamboo"
+        l_stats2.Text = "Gear: " .. S.gear .. " | Tame: " .. S.tame .. " | Evt: " .. S.evt
+        l_dbg.Text = (is_inv_full() and "!! INVENTORY FULL !!" or DbgMsg)
         local ts = {}
-        for k, v in pairs(ThreadStatus) do table.insert(ts, k .. ":" .. tostring(v)) end
-        l_tstat.Text = table.concat(ts, " | ")
+        for k, v in pairs(ThreadInfo) do table.insert(ts, k .. ":" .. v) end
+        l_threads.Text = table.concat(ts, " | ")
+        -- NPC check
+        local stevenOk = find_npc("Steven") and "Y" or "N"
+        local samOk = find_npc("Sam") and "Y" or "N"
+        local georgeOk = find_npc("George") and "Y" or "N"
+        l_npcs.Text = "NPC Steven:" .. stevenOk .. " Sam:" .. samOk .. " George:" .. georgeOk
         l_info1.Text = "Buy: Bamboo + Trowel"
-        l_info2.Text = "Pets: Unicorn + Dragon + Wyvern"
-        l_info3.Text = "Sell every " .. SELL_AT .. " harvests"
+        l_info2.Text = "Pets: Unicorn+Dragon+Wyvern"
+        togbtn.Text = Running and "STOP" or "START"
+        togbtn.BackgroundColor3 = Running and Color3.fromRGB(30, 100, 30) or Color3.fromRGB(100, 25, 25)
         task.wait(0.4)
     end
 end)
@@ -572,17 +727,38 @@ end)
 -- LAUNCH
 --------------------------------------------------------------
 print("[GAG2] ═══════════════════════════════════════")
-print("[GAG2]  BRUTAL v6 — ERROR RECOVERY + TOGGLE")
+print("[GAG2]  v7 — ProximityPrompt + GUI Dialog")
+print("[GAG2]  Sell: Steven prompt → 'Sell Inventory'")
+print("[GAG2]  Buy: Sam prompt → shop GUI → Bamboo")
 print("[GAG2] ═══════════════════════════════════════")
 
-init_remotes()
+-- Debug: show NPCs found
+local steven = find_npc("Steven")
+local sam = find_npc("Sam")
+local george = find_npc("George")
+print("[GAG2] NPCs: Steven=" .. tostring(steven ~= nil) .. " Sam=" .. tostring(sam ~= nil) .. " George=" .. tostring(george ~= nil))
+if steven then
+    local pos = npc_pos(steven)
+    print("[GAG2] Steven pos: " .. (pos and tostring(pos) or "nil"))
+    print("[GAG2] Steven prompt: " .. tostring(npc_prompt(steven) ~= nil))
+end
 
-safe_thread("harvest", thread_harvest)
+-- Debug: dump remotes
+print("[GAG2] === REMOTES ===")
+for _, c in ipairs(RS:GetDescendants()) do
+    if c:IsA("RemoteEvent") or c:IsA("RemoteFunction") then
+        print("[GAG2] RE: " .. c.Name .. " @ " .. c:GetFullName())
+    end
+end
+
+safe_thread("harv", thread_harvest)
 safe_thread("sell", thread_sell)
 safe_thread("buy", thread_buy)
 safe_thread("pets", thread_pets)
-safe_thread("events", thread_events)
+safe_thread("evt", thread_events)
 
-print("[GAG2] 5 threads launched")
+DbgMsg = "5 THREADS ACTIVE"
+print("[GAG2] Launched 5 threads")
 getgenv().GAG2_Stop = function() Running = false end
+getgenv().GAG2_Sell = do_sell
 getgenv().GAG2_Stats = S
